@@ -17,6 +17,7 @@ from src.ingestion.extractor import (
     Relationship,
 )
 from src.retrieval.search import (
+    DummyEmbeddings,
     HybridResult,
     VectorStore,
     hybrid_search,
@@ -61,7 +62,7 @@ SAMPLE_EXTRACTION = ExtractionResult(
 
 
 def _build_vector_store() -> VectorStore:
-    vs = VectorStore()
+    vs = VectorStore(embedder=DummyEmbeddings())
     for doc in SAMPLE_DOCUMENTS:
         vs.add(doc)
     return vs

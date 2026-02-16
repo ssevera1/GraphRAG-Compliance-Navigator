@@ -7,15 +7,29 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
+from langchain_core.embeddings import Embeddings
+
 from src.storage.graph import KnowledgeGraph
 
 
-# ── Dummy embedding helpers (swap for real model later) ──────────────────────
+# ── Dummy embeddings (for tests — no API key required) ───────────────────────
 
-def dummy_embed(text: str) -> list[float]:
-    """Deterministic 64-dim mock embedding derived from an MD5 hash."""
-    digest = hashlib.md5(text.encode()).hexdigest()
-    return [int(c, 16) / 15.0 for c in digest[:64].ljust(64, "0")]
+class DummyEmbeddings(Embeddings):
+    """Deterministic 64-dim mock embeddings derived from MD5 hashes.
+
+    Useful for unit tests where semantic similarity is not required.
+    """
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._embed(t) for t in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed(text)
+
+    @staticmethod
+    def _embed(text: str) -> list[float]:
+        digest = hashlib.md5(text.encode()).hexdigest()
+        return [int(c, 16) / 15.0 for c in digest[:64].ljust(64, "0")]
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -27,21 +41,41 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (mag_a * mag_b)
 
 
-# ── In-memory vector store (placeholder) ────────────────────────────────────
+# ── In-memory vector store ──────────────────────────────────────────────────
+
+def _default_embedder() -> Embeddings:
+    """Lazy-load HuggingFaceEmbeddings so the import cost is paid only when needed."""
+    from langchain_huggingface import HuggingFaceEmbeddings  # noqa: WPS433
+
+    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
 
 @dataclass
 class VectorStore:
-    """Minimal in-memory vector index for prototyping."""
+    """Minimal in-memory vector index.
 
+    Parameters
+    ----------
+    embedder:
+        Any LangChain ``Embeddings`` implementation.  Defaults to
+        ``HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")`` when
+        *None* is provided.
+    """
+
+    embedder: Embeddings = field(default=None)  # type: ignore[assignment]
     documents: list[str] = field(default_factory=list)
     embeddings: list[list[float]] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        if self.embedder is None:
+            self.embedder = _default_embedder()
+
     def add(self, text: str) -> None:
         self.documents.append(text)
-        self.embeddings.append(dummy_embed(text))
+        self.embeddings.append(self.embedder.embed_query(text))
 
     def search(self, query: str, top_k: int = 5) -> list[dict]:
-        q_emb = dummy_embed(query)
+        q_emb = self.embedder.embed_query(query)
         scored = [
             {"text": doc, "score": cosine_similarity(q_emb, emb)}
             for doc, emb in zip(self.documents, self.embeddings)

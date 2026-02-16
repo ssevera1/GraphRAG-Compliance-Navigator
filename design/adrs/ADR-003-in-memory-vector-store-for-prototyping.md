@@ -1,7 +1,8 @@
 # ADR-003: In-Memory Vector Store with Mock Embeddings for Prototyping
 
-**Status:** Accepted (temporary — to be replaced)
+**Status:** Superseded
 **Date:** 2026-02-16
+**Superseded:** 2026-02-16 — `VectorStore` now accepts an injected `Embeddings` instance (defaults to `HuggingFaceEmbeddings("all-MiniLM-L6-v2")`). Mock embeddings preserved as `DummyEmbeddings` for tests.
 
 ## Context
 
@@ -27,6 +28,6 @@ Use a **custom in-memory `VectorStore`** with deterministic MD5-based mock embed
 
 ## Migration Path
 
-1. Replace `dummy_embed()` with a real embedding function (e.g. `OpenAIEmbeddings`, `sentence-transformers`).
+1. ~~Replace `dummy_embed()` with a real embedding function~~ — **Done.** `VectorStore` now accepts any LangChain `Embeddings` via constructor injection. Default is `HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")`. The old `dummy_embed()` function has been wrapped in a `DummyEmbeddings` class for test use.
 2. Replace the in-memory store with a vector database (FAISS for local, Pinecone/Weaviate/Chroma for managed).
 3. Update `VectorStore.search()` to use the database's native ANN search.
