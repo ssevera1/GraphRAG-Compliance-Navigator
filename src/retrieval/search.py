@@ -6,6 +6,7 @@ import hashlib
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from typing import Any
 
 from langchain_core.embeddings import Embeddings
 
@@ -76,7 +77,7 @@ class VectorStore:
 
     def search(self, query: str, top_k: int = 5) -> list[dict]:
         q_emb = self.embedder.embed_query(query)
-        scored = [
+        scored: list[dict[str, Any]] = [
             {"text": doc, "score": cosine_similarity(q_emb, emb)}
             for doc, emb in zip(self.documents, self.embeddings)
         ]

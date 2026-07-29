@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -76,6 +76,26 @@ Return ONLY valid JSON matching this schema (no extra keys):
 
 # ── Extraction function ──────────────────────────────────────────────────────
 
+def _as_text(content: str | list[str | dict[Any, Any]]) -> str:
+    """Flatten a message payload to text.
+
+    A chat model returns either a plain string or a list of content blocks;
+    treating the list case as a string raises AttributeError at runtime.
+    """
+    if isinstance(content, str):
+        return content
+
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict):
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
+
+
 def extract_entities_and_relationships(
     text: str,
     llm: BaseChatModel,
@@ -100,7 +120,7 @@ def extract_entities_and_relationships(
     ]
 
     response = llm.invoke(messages)
-    content = response.content
+    content = _as_text(response.content)
 
     # Strip markdown fences if the model wraps the JSON.
     if "```" in content:
