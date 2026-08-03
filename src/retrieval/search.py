@@ -220,6 +220,9 @@ def hybrid_search(
         return _retry_with_backoff(lambda: vector_store.search(query, top_k=top_k))
 
     def _graph_search() -> list[dict]:
+        if not entity_names:
+            return []
+
         def _search_with_retry() -> list[dict]:
             results: list[dict] = []
             for name in entity_names:
