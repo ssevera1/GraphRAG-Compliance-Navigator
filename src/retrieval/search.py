@@ -34,6 +34,30 @@ class DummyEmbeddings(Embeddings):
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors.
+
+    Parameters
+    ----------
+    a, b:
+        Embedding vectors.
+
+    Returns
+    -------
+    float
+        Similarity score in [0, 1], or 0.0 if either vector is None or empty.
+
+    Raises
+    ------
+    ValueError
+        If vectors have different lengths.
+    """
+    if a is None or b is None:
+        return 0.0
+    if not a or not b:
+        return 0.0
+    if len(a) != len(b):
+        raise ValueError(f"Vector length mismatch: {len(a)} vs {len(b)}")
+    
     dot = sum(x * y for x, y in zip(a, b))
     mag_a = sum(x * x for x in a) ** 0.5
     mag_b = sum(x * x for x in b) ** 0.5
