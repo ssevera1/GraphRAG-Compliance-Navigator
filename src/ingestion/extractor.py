@@ -126,5 +126,8 @@ def extract_entities_and_relationships(
     if "```" in content:
         content = content.split("```json")[-1].split("```")[0]
 
-    parsed = json.loads(content)
-    return ExtractionResult.model_validate(parsed)
+    try:
+        parsed = json.loads(content)
+        return ExtractionResult.model_validate(parsed)
+    except (json.JSONDecodeError, ValueError):
+        return ExtractionResult()
