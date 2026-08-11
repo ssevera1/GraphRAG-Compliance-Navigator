@@ -101,6 +101,8 @@ class VectorStore:
         self.embeddings.append(self.embedder.embed_query(text))
 
     def search(self, query: str, top_k: int = 5) -> list[dict]:
+        if not self.documents:
+            return []
         q_emb = self.embedder.embed_query(query)
         scored: list[dict[str, Any]] = [
             {"text": doc, "score": cosine_similarity(q_emb, emb)}
