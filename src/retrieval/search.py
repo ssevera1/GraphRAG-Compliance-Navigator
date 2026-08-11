@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from langchain_core.embeddings import Embeddings
 
@@ -102,6 +103,59 @@ def _extract_entity_names_from_query(query: str) -> list[str]:
     return unique
 
 
+# ── Retry logic ─────────────────────────────────────────────────────────────
+
+T = TypeVar("T")
+
+
+def _retry_with_backoff(
+    func: Callable[[], T],
+    max_retries: int = 3,
+    initial_delay: float = 0.1,
+    backoff_factor: float = 2.0,
+) -> T:
+    """Execute function with exponential backoff retry on failure.
+
+    Parameters
+    ----------
+    func:
+        Callable to execute.
+    max_retries:
+        Maximum number of retry attempts.
+    initial_delay:
+        Initial delay in seconds before first retry.
+    backoff_factor:
+        Multiplier for delay after each retry.
+
+    Returns
+    -------
+    T
+        Result of successful function execution.
+
+    Raises
+    ------
+    Exception
+        If all retries are exhausted.
+    """
+    delay = initial_delay
+    last_exception: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            return func()
+        except Exception as e:
+            last_exception = e
+            if attempt < max_retries:
+                time.sleep(delay)
+                delay *= backoff_factor
+            else:
+                break
+
+    raise last_exception if last_exception else RuntimeError(
+        "Function failed after retries with no exception captured"
+    )
+
+
 # ── Hybrid search ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -137,14 +191,17 @@ def hybrid_search(
     entity_names = _extract_entity_names_from_query(query)
 
     def _vector_search() -> list[dict]:
-        return vector_store.search(query, top_k=top_k)
+        return _retry_with_backoff(lambda: vector_store.search(query, top_k=top_k))
 
     def _graph_search() -> list[dict]:
-        results: list[dict] = []
-        for name in entity_names:
-            neighbours = knowledge_graph.get_neighbours(name)
-            results.extend(neighbours)
-        return results
+        def _search_with_retry() -> list[dict]:
+            results: list[dict] = []
+            for name in entity_names:
+                neighbours = knowledge_graph.get_neighbours(name)
+                results.extend(neighbours)
+            return results
+
+        return _retry_with_backoff(_search_with_retry)
 
     hybrid = HybridResult()
 
@@ -155,9 +212,16 @@ def hybrid_search(
         }
         for future in as_completed(futures):
             label = futures[future]
-            if label == "vector":
-                hybrid.vector_results = future.result()
-            else:
-                hybrid.graph_results = future.result()
+            try:
+                result = future.result(timeout=30)
+                if label == "vector":
+                    hybrid.vector_results = result
+                else:
+                    hybrid.graph_results = result
+            except Exception:
+                if label == "vector":
+                    hybrid.vector_results = []
+                else:
+                    hybrid.graph_results = []
 
     return hybrid
