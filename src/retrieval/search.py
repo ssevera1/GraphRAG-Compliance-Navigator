@@ -227,7 +227,14 @@ def hybrid_search(
             results: list[dict] = []
             for name in entity_names:
                 neighbours = knowledge_graph.get_neighbours(name)
-                results.extend(neighbours)
+                if neighbours is None:
+                    continue
+                if not isinstance(neighbours, list):
+                    continue
+                for record in neighbours:
+                    if not isinstance(record, dict):
+                        continue
+                    results.append(record)
             return results
 
         return _retry_with_backoff(_search_with_retry)
