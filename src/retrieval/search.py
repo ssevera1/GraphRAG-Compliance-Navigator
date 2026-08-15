@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar
 
@@ -233,20 +233,26 @@ def hybrid_search(
         return _retry_with_backoff(_search_with_retry)
 
     hybrid = HybridResult()
+    task_timeout = 30
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {
             pool.submit(_vector_search): "vector",
             pool.submit(_graph_search): "graph",
         }
-        for future in as_completed(futures):
+        for future in as_completed(futures, timeout=task_timeout):
             label = futures[future]
             try:
-                result = future.result(timeout=30)
+                result = future.result(timeout=task_timeout)
                 if label == "vector":
                     hybrid.vector_results = result
                 else:
                     hybrid.graph_results = result
+            except TimeoutError:
+                if label == "vector":
+                    hybrid.vector_results = []
+                else:
+                    hybrid.graph_results = []
             except Exception:
                 if label == "vector":
                     hybrid.vector_results = []
