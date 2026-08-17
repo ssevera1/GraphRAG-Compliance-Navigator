@@ -184,6 +184,26 @@ def _retry_with_backoff(
 
 # ── Hybrid search ────────────────────────────────────────────────────────────
 
+def _is_valid_neighbour(neighbour: Any) -> bool:
+    """Check if a neighbour structure is well-formed.
+    
+    Parameters
+    ----------
+    neighbour:
+        A neighbour result from the knowledge graph.
+    
+    Returns
+    -------
+    bool
+        True if the neighbour is a non-empty dict with required structure.
+    """
+    if not isinstance(neighbour, dict):
+        return False
+    if not neighbour:
+        return False
+    return True
+
+
 @dataclass
 class HybridResult:
     vector_results: list[dict] = field(default_factory=list)
@@ -227,7 +247,13 @@ def hybrid_search(
             results: list[dict] = []
             for name in entity_names:
                 neighbours = knowledge_graph.get_neighbours(name)
-                results.extend(neighbours)
+                if neighbours is None:
+                    continue
+                if not isinstance(neighbours, list):
+                    continue
+                for neighbour in neighbours:
+                    if _is_valid_neighbour(neighbour):
+                        results.append(neighbour)
             return results
 
         return _retry_with_backoff(_search_with_retry)
