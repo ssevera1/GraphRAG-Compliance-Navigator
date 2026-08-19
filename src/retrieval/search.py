@@ -204,6 +204,11 @@ def _is_valid_neighbour(neighbour: Any) -> bool:
     return True
 
 
+class GraphTraversalError(Exception):
+    """Raised when graph traversal encounters invalid data or missing entities."""
+    pass
+
+
 @dataclass
 class HybridResult:
     vector_results: list[dict] = field(default_factory=list)
@@ -233,6 +238,11 @@ def hybrid_search(
     -------
     HybridResult
         Combined results from both retrieval paths.
+    
+    Raises
+    ------
+    GraphTraversalError
+        If graph traversal fails to validate entity names or neighbour records.
     """
     entity_names = _extract_entity_names_from_query(query)
 
@@ -245,15 +255,43 @@ def hybrid_search(
 
         def _search_with_retry() -> list[dict]:
             results: list[dict] = []
+            errors: list[str] = []
+            
             for name in entity_names:
-                neighbours = knowledge_graph.get_neighbours(name)
+                if not isinstance(name, str) or not name.strip():
+                    errors.append(f"Invalid entity name: {repr(name)}")
+                    continue
+                    
+                try:
+                    neighbours = knowledge_graph.get_neighbours(name)
+                except Exception as e:
+                    errors.append(
+                        f"Failed to fetch neighbours for '{name}': {type(e).__name__}: {e}"
+                    )
+                    continue
+                
                 if neighbours is None:
                     continue
+                    
                 if not isinstance(neighbours, list):
+                    errors.append(
+                        f"Expected list from get_neighbours('{name}'), "
+                        f"got {type(neighbours).__name__}"
+                    )
                     continue
-                for neighbour in neighbours:
-                    if _is_valid_neighbour(neighbour):
-                        results.append(neighbour)
+                
+                for idx, neighbour in enumerate(neighbours):
+                    if not _is_valid_neighbour(neighbour):
+                        errors.append(
+                            f"Invalid neighbour record at index {idx} for entity '{name}': "
+                            f"expected non-empty dict, got {type(neighbour).__name__}"
+                        )
+                        continue
+                    results.append(neighbour)
+            
+            if errors:
+                raise GraphTraversalError("\n".join(errors))
+            
             return results
 
         return _retry_with_backoff(_search_with_retry)
