@@ -120,11 +120,22 @@ def extract_entities_and_relationships(
     ]
 
     response = llm.invoke(messages)
+
+    if response.content is None:
+        return ExtractionResult()
+
     content = _as_text(response.content)
+
+    if not content or not content.strip():
+        return ExtractionResult()
 
     # Strip markdown fences if the model wraps the JSON.
     if "```" in content:
         content = content.split("```json")[-1].split("```")[0]
+
+    content = content.strip()
+    if not content:
+        return ExtractionResult()
 
     try:
         parsed = json.loads(content)
