@@ -361,3 +361,57 @@ class TestGraphTraversalObservability:
             )
 
         assert caplog.text == ""
+
+
+class TestHybridArmFailureIsVisible:
+    """A whole arm collapsing must not look like a query with no matches."""
+
+    def test_graph_arm_failure_is_logged_and_vector_survives(self, caplog):
+        vs = _build_vector_store()
+        kg = MagicMock(spec=KnowledgeGraph)
+
+        def _boom(name):
+            raise RuntimeError("neo4j is down")
+
+        kg.get_neighbours = _boom
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            result = hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert result.graph_results == []
+        assert len(result.vector_results) > 0, "the healthy arm must still answer"
+        assert "graph arm of hybrid_search failed" in caplog.text
+        assert "neo4j is down" in caplog.text
+
+    def test_vector_arm_failure_is_logged_and_graph_survives(self, caplog):
+        vs = MagicMock()
+        vs.search.side_effect = RuntimeError("embedding backend unreachable")
+        kg = _mock_knowledge_graph()
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            result = hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert result.vector_results == []
+        assert len(result.graph_results) > 0, "the healthy arm must still answer"
+        assert "vector arm of hybrid_search failed" in caplog.text
+
+    def test_healthy_query_logs_no_arm_failure(self, caplog):
+        vs = _build_vector_store()
+        kg = _mock_knowledge_graph()
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert "hybrid_search failed" not in caplog.text

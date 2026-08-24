@@ -308,6 +308,15 @@ def hybrid_search(
                 else:
                     hybrid.graph_results = result
             except Exception:
+                # Without this, a total failure of one arm is indistinguishable
+                # from that arm legitimately finding nothing - the same
+                # invisibility the per-record skips above were fixed for.
+                logger.warning(
+                    "%s arm of hybrid_search failed; it contributes no results "
+                    "to this query",
+                    label,
+                    exc_info=True,
+                )
                 if label == "vector":
                     hybrid.vector_results = []
                 else:
