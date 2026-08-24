@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import time
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar
@@ -12,6 +14,8 @@ from typing import Any, Callable, TypeVar
 from langchain_core.embeddings import Embeddings
 
 from src.storage.graph import KnowledgeGraph
+
+logger = logging.getLogger(__name__)
 
 
 # ── Dummy embeddings (for tests — no API key required) ───────────────────────
@@ -247,13 +251,43 @@ def hybrid_search(
             results: list[dict] = []
             for name in entity_names:
                 neighbours = knowledge_graph.get_neighbours(name)
+
                 if neighbours is None:
+                    logger.warning(
+                        "get_neighbours(%r) returned None, expected an iterable "
+                        "of dicts; skipping this entity",
+                        name,
+                    )
                     continue
-                if not isinstance(neighbours, list):
+
+                # Deliberately an iterable check rather than isinstance(list):
+                # get_neighbours currently materialises a list comprehension
+                # over the Neo4j cursor, but streaming those records instead is
+                # a plausible refactor, and a stricter check would then discard
+                # every neighbour for every entity.
+                if isinstance(neighbours, (str, bytes)) or not isinstance(
+                    neighbours, Iterable
+                ):
+                    logger.warning(
+                        "get_neighbours(%r) returned %s, expected an iterable "
+                        "of dicts; skipping this entity",
+                        name,
+                        type(neighbours).__name__,
+                    )
                     continue
+
                 for neighbour in neighbours:
-                    if _is_valid_neighbour(neighbour):
-                        results.append(neighbour)
+                    if not _is_valid_neighbour(neighbour):
+                        logger.warning(
+                            "get_neighbours(%r) yielded an invalid record (%s); "
+                            "skipping that record",
+                            name,
+                            "empty dict"
+                            if isinstance(neighbour, dict)
+                            else type(neighbour).__name__,
+                        )
+                        continue
+                    results.append(neighbour)
             return results
 
         return _retry_with_backoff(_search_with_retry)

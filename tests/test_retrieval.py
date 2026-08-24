@@ -5,6 +5,7 @@ These tests mock the Neo4j driver so they run without a live database.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -244,3 +245,119 @@ class TestExtractionResult:
         types = {r.type for r in SAMPLE_EXTRACTION.relationships}
         assert EdgeType.VIOLATES in types
         assert EdgeType.REQUIRES in types
+
+
+class TestGraphTraversalObservability:
+    """A malformed get_neighbours response must be visible, not silent.
+
+    Without these, 'the entity genuinely has no neighbours' and 'the graph
+    backend returned garbage' are indistinguishable at the call site.
+    """
+
+    def _kg_returning(self, value, only_for="GDPR"):
+        """Return `value` for one entity; the extractor also yields "What"."""
+        kg = MagicMock(spec=KnowledgeGraph)
+        kg.get_neighbours = lambda name: value if name == only_for else []
+        return kg
+
+    def test_none_response_is_logged_and_skipped(self, caplog):
+        vs = _build_vector_store()
+        kg = self._kg_returning(None)
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            result = hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert result.graph_results == []
+        assert "returned None" in caplog.text
+        assert "GDPR" in caplog.text
+
+    def test_non_iterable_response_is_logged_and_skipped(self, caplog):
+        vs = _build_vector_store()
+        kg = self._kg_returning(42)
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            result = hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert result.graph_results == []
+        assert "returned int" in caplog.text
+
+    def test_string_response_is_treated_as_invalid_not_iterated(self, caplog):
+        """A str is iterable, but iterating it yields characters, not records."""
+        vs = _build_vector_store()
+        kg = self._kg_returning("not a record list")
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            result = hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert result.graph_results == []
+        assert "returned str" in caplog.text
+
+    def test_malformed_record_is_logged_and_the_rest_survive(self, caplog):
+        """One bad record must not discard the good ones alongside it."""
+        good = {
+            "source": "GDPR",
+            "relationship": "REQUIRES",
+            "target": "Article 5",
+            "target_labels": ["Clause"],
+            "rel_props": {},
+        }
+        vs = _build_vector_store()
+        kg = self._kg_returning([good, "junk", {}, None])
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            result = hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert result.graph_results == [good]
+        assert "invalid record (str)" in caplog.text
+        assert "invalid record (empty dict)" in caplog.text
+        assert "invalid record (NoneType)" in caplog.text
+
+    def test_generator_response_is_accepted(self):
+        """A streamed cursor must not be discarded by an over-strict check."""
+        good = {
+            "source": "GDPR",
+            "relationship": "REQUIRES",
+            "target": "Article 5",
+            "target_labels": ["Clause"],
+            "rel_props": {},
+        }
+        vs = _build_vector_store()
+        kg = MagicMock(spec=KnowledgeGraph)
+        kg.get_neighbours = lambda name: (r for r in ([good] if name == "GDPR" else []))
+
+        result = hybrid_search(
+            query="What clauses violate GDPR?",
+            vector_store=vs,
+            knowledge_graph=kg,
+        )
+
+        assert result.graph_results == [good]
+
+    def test_well_formed_response_logs_nothing(self, caplog):
+        vs = _build_vector_store()
+        kg = _mock_knowledge_graph()
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert caplog.text == ""
