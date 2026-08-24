@@ -276,7 +276,16 @@ def hybrid_search(
                     )
                     continue
 
-                for neighbour in neighbours:
+                neighbours_list = list(neighbours)
+                if not neighbours_list:
+                    logger.warning(
+                        "get_neighbours(%r) returned an empty iterable; "
+                        "no neighbours found for this entity",
+                        name,
+                    )
+                    continue
+
+                for neighbour in neighbours_list:
                     if not _is_valid_neighbour(neighbour):
                         logger.warning(
                             "get_neighbours(%r) yielded an invalid record (%s); "
