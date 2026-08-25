@@ -362,6 +362,59 @@ class TestGraphTraversalObservability:
 
         assert caplog.text == ""
 
+    def test_empty_neighbours_is_debug_not_warning(self, caplog):
+        """Most extracted names are not graph nodes; that is not a failure.
+
+        _extract_entity_names_from_query is a capitalisation heuristic, so the
+        leading word of nearly every query ("What", "Which", "Under") reaches
+        get_neighbours and legitimately has none. Logging that at WARNING would
+        fire once per non-entity token per query and bury the malformed-record
+        warnings that share this logger.
+        """
+        vs = _build_vector_store()
+        kg = _mock_knowledge_graph()
+
+        with caplog.at_level(logging.DEBUG, logger="src.retrieval.search"):
+            hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        empty_records = [
+            r for r in caplog.records if "returned no neighbours" in r.message
+        ]
+        assert empty_records, "the empty lookup should still be observable"
+        assert [r.levelno for r in empty_records] == [logging.DEBUG]
+        assert "'What'" in empty_records[0].getMessage()
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_peeking_for_emptiness_does_not_drop_the_first_record(self):
+        """Emptiness is decided by consuming one record - it must be put back."""
+        records = [
+            {
+                "source": "GDPR",
+                "relationship": "REQUIRES",
+                "target": f"Article {n}",
+                "target_labels": ["Clause"],
+                "rel_props": {},
+            }
+            for n in (5, 17, 25)
+        ]
+        vs = _build_vector_store()
+        kg = MagicMock(spec=KnowledgeGraph)
+        kg.get_neighbours = lambda name: (
+            r for r in (records if name == "GDPR" else [])
+        )
+
+        result = hybrid_search(
+            query="What clauses violate GDPR?",
+            vector_store=vs,
+            knowledge_graph=kg,
+        )
+
+        assert result.graph_results == records
+
 
 class TestHybridArmFailureIsVisible:
     """A whole arm collapsing must not look like a query with no matches."""
