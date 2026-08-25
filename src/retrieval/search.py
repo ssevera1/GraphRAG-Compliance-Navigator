@@ -9,6 +9,7 @@ import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import Any, Callable, TypeVar
 
 from langchain_core.embeddings import Embeddings
@@ -188,6 +189,12 @@ def _retry_with_backoff(
 
 # ── Hybrid search ────────────────────────────────────────────────────────────
 
+# Sentinel for "the iterable was empty", distinct from any record a graph
+# backend could legitimately yield (including None, which _is_valid_neighbour
+# rejects as a malformed record rather than as an absence).
+_NO_NEIGHBOURS: Any = object()
+
+
 def _is_valid_neighbour(neighbour: Any) -> bool:
     """Check if a neighbour structure is well-formed.
     
@@ -276,7 +283,24 @@ def hybrid_search(
                     )
                     continue
 
-                for neighbour in neighbours:
+                # Peek rather than materialise: list() here would drain the
+                # cursor the comment above is written to keep streamable.
+                # DEBUG, not WARNING - _extract_entity_names_from_query is a
+                # capitalisation heuristic, so the sentence-initial word of
+                # almost every query ("What", "Which", "Under") arrives here
+                # as a non-node and legitimately has no neighbours. Warning on
+                # that would bury the actionable warnings below it.
+                iterator = iter(neighbours)
+                first = next(iterator, _NO_NEIGHBOURS)
+                if first is _NO_NEIGHBOURS:
+                    logger.debug(
+                        "get_neighbours(%r) returned no neighbours; this "
+                        "entity contributes nothing to the graph arm",
+                        name,
+                    )
+                    continue
+
+                for neighbour in chain([first], iterator):
                     if not _is_valid_neighbour(neighbour):
                         logger.warning(
                             "get_neighbours(%r) yielded an invalid record (%s); "
