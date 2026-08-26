@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from enum import Enum
 from typing import Any, Optional
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 # ── Domain types ──────────────────────────────────────────────────────────────
@@ -112,21 +115,43 @@ def extract_entities_and_relationships(
     Returns
     -------
     ExtractionResult
-        Parsed entities and relationships.
+        Parsed entities and relationships. Empty if the model returned no
+        content or content this function could not parse as the JSON schema.
+
+    Raises
+    ------
+    Exception
+        Whatever ``llm.invoke`` raises. An extraction that never reached the
+        model is deliberately *not* reported as an empty result: callers feed
+        this straight into ``KnowledgeGraph.add_extraction``, so swallowing the
+        failure would write a silently incomplete graph.
     """
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=f"Extract entities and relationships from:\n\n{text}"),
     ]
 
-    response = llm.invoke(messages)
+    try:
+        response = llm.invoke(messages)
+    except Exception:
+        # Logged here because this is where the chunk being extracted is known,
+        # then re-raised: only the caller driving the ingestion loop can decide
+        # whether to skip the chunk, retry, or abort the batch.
+        logger.warning(
+            "LLM invocation failed for a chunk of %d chars",
+            len(text),
+            exc_info=True,
+        )
+        raise
 
     if response.content is None:
+        logger.debug("LLM returned empty content")
         return ExtractionResult()
 
     content = _as_text(response.content)
 
     if not content or not content.strip():
+        logger.debug("LLM response content is empty after text extraction")
         return ExtractionResult()
 
     # Strip markdown fences if the model wraps the JSON.
@@ -135,10 +160,12 @@ def extract_entities_and_relationships(
 
     content = content.strip()
     if not content:
+        logger.debug("LLM response is empty after markdown fence removal")
         return ExtractionResult()
 
     try:
         parsed = json.loads(content)
         return ExtractionResult.model_validate(parsed)
     except (json.JSONDecodeError, ValueError):
+        logger.warning("Failed to parse LLM response as JSON", exc_info=True)
         return ExtractionResult()
