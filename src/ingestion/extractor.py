@@ -115,7 +115,16 @@ def extract_entities_and_relationships(
     Returns
     -------
     ExtractionResult
-        Parsed entities and relationships. Returns empty result on LLM failures.
+        Parsed entities and relationships. Empty if the model returned no
+        content or content this function could not parse as the JSON schema.
+
+    Raises
+    ------
+    Exception
+        Whatever ``llm.invoke`` raises. An extraction that never reached the
+        model is deliberately *not* reported as an empty result: callers feed
+        this straight into ``KnowledgeGraph.add_extraction``, so swallowing the
+        failure would write a silently incomplete graph.
     """
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
@@ -124,11 +133,16 @@ def extract_entities_and_relationships(
 
     try:
         response = llm.invoke(messages)
-    except Exception as e:
+    except Exception:
+        # Logged here because this is where the chunk being extracted is known,
+        # then re-raised: only the caller driving the ingestion loop can decide
+        # whether to skip the chunk, retry, or abort the batch.
         logger.warning(
-            f"LLM invocation failed (timeout, rate limit, or connection error): {type(e).__name__}: {e}"
+            "LLM invocation failed for a chunk of %d chars",
+            len(text),
+            exc_info=True,
         )
-        return ExtractionResult()
+        raise
 
     if response.content is None:
         logger.debug("LLM returned empty content")
@@ -152,6 +166,6 @@ def extract_entities_and_relationships(
     try:
         parsed = json.loads(content)
         return ExtractionResult.model_validate(parsed)
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.warning(f"Failed to parse LLM response as JSON: {e}")
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("Failed to parse LLM response as JSON", exc_info=True)
         return ExtractionResult()
