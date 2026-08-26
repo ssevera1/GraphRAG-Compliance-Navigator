@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from enum import Enum
 from typing import Any, Optional
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 # ── Domain types ──────────────────────────────────────────────────────────────
@@ -112,21 +115,29 @@ def extract_entities_and_relationships(
     Returns
     -------
     ExtractionResult
-        Parsed entities and relationships.
+        Parsed entities and relationships. Returns empty result on LLM failures.
     """
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=f"Extract entities and relationships from:\n\n{text}"),
     ]
 
-    response = llm.invoke(messages)
+    try:
+        response = llm.invoke(messages)
+    except Exception as e:
+        logger.warning(
+            f"LLM invocation failed (timeout, rate limit, or connection error): {type(e).__name__}: {e}"
+        )
+        return ExtractionResult()
 
     if response.content is None:
+        logger.debug("LLM returned empty content")
         return ExtractionResult()
 
     content = _as_text(response.content)
 
     if not content or not content.strip():
+        logger.debug("LLM response content is empty after text extraction")
         return ExtractionResult()
 
     # Strip markdown fences if the model wraps the JSON.
@@ -135,10 +146,12 @@ def extract_entities_and_relationships(
 
     content = content.strip()
     if not content:
+        logger.debug("LLM response is empty after markdown fence removal")
         return ExtractionResult()
 
     try:
         parsed = json.loads(content)
         return ExtractionResult.model_validate(parsed)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"Failed to parse LLM response as JSON: {e}")
         return ExtractionResult()
