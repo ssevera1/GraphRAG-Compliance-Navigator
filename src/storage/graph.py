@@ -4,8 +4,49 @@ from __future__ import annotations
 
 import time
 from neo4j import GraphDatabase, Driver
+from neo4j.exceptions import AuthError, ConfigurationError
 
 from src.ingestion.extractor import Entity, ExtractionResult, Relationship
+
+_MAX_RETRIES = 5
+_BASE_DELAY = 0.5
+
+
+def _connect_with_retries(uri: str, user: str, password: str) -> Driver:
+    """Return a Driver whose connectivity has been verified.
+
+    ``GraphDatabase.driver()`` only builds a connection pool; it does not talk
+    to the server, so the failure surfaces from ``verify_connectivity()`` when
+    the driver object already exists. Each failed attempt is therefore closed
+    before the next one, otherwise a Neo4j that is still booting leaves one
+    orphaned pool (and its background threads) per retry.
+
+    Misconfiguration -- bad credentials or a bad URI -- is not transient, so it
+    propagates immediately instead of stalling for the full retry budget.
+    """
+    for attempt in range(_MAX_RETRIES):
+        driver: Driver | None = None
+        try:
+            driver = GraphDatabase.driver(uri, auth=(user, password))
+            driver.verify_connectivity()
+            return driver
+        except (AuthError, ConfigurationError):
+            if driver is not None:
+                driver.close()
+            raise
+        except Exception as exc:
+            if driver is not None:
+                driver.close()
+            if attempt == _MAX_RETRIES - 1:
+                raise RuntimeError(
+                    f"Failed to connect to Neo4j at {uri} "
+                    f"after {_MAX_RETRIES} attempts"
+                ) from exc
+            time.sleep(_BASE_DELAY * (2 ** attempt))
+
+    raise RuntimeError(  # pragma: no cover - _MAX_RETRIES is always >= 1
+        f"Failed to connect to Neo4j at {uri}: no connection attempts were made"
+    )
 
 
 class KnowledgeGraph:
@@ -20,25 +61,7 @@ class KnowledgeGraph:
     """
 
     def __init__(self, uri: str, user: str, password: str) -> None:
-        self._driver: Driver | None = None
-        max_retries = 5
-        base_delay = 0.5
-        
-        for attempt in range(max_retries):
-            try:
-                self._driver = GraphDatabase.driver(uri, auth=(user, password))
-                # Validate connection by running a simple query
-                with self._driver.session() as session:
-                    session.run("RETURN 1")
-                return
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)
-                    time.sleep(delay)
-                else:
-                    raise RuntimeError(
-                        f"Failed to connect to Neo4j at {uri} after {max_retries} attempts"
-                    ) from e
+        self._driver: Driver = _connect_with_retries(uri, user, password)
 
     # ── public API ────────────────────────────────────────────────────────
 
