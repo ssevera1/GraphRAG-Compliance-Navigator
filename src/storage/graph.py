@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from neo4j import GraphDatabase, Driver
 
 from src.ingestion.extractor import Entity, ExtractionResult, Relationship
@@ -19,7 +20,25 @@ class KnowledgeGraph:
     """
 
     def __init__(self, uri: str, user: str, password: str) -> None:
-        self._driver: Driver = GraphDatabase.driver(uri, auth=(user, password))
+        self._driver: Driver | None = None
+        max_retries = 5
+        base_delay = 0.5
+        
+        for attempt in range(max_retries):
+            try:
+                self._driver = GraphDatabase.driver(uri, auth=(user, password))
+                # Validate connection by running a simple query
+                with self._driver.session() as session:
+                    session.run("RETURN 1")
+                return
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    time.sleep(delay)
+                else:
+                    raise RuntimeError(
+                        f"Failed to connect to Neo4j at {uri} after {max_retries} attempts"
+                    ) from e
 
     # ── public API ────────────────────────────────────────────────────────
 
