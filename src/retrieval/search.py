@@ -215,6 +215,31 @@ def _is_valid_neighbour(neighbour: Any) -> bool:
     return True
 
 
+def _is_valid_graph_results(results: Any) -> bool:
+    """Validate that graph traversal results are well-formed.
+
+    An empty list is a normal outcome (e.g. no extracted entity names, or
+    every candidate entity legitimately having no neighbours) and must not
+    be treated as malformed - only reject results that aren't a list of
+    dicts. In the current caller, every item appended to `results` already
+    passed `_is_valid_neighbour`, so the per-item check here is
+    defense-in-depth against a future caller, not a live path.
+
+    Parameters
+    ----------
+    results:
+        The result from a graph search operation.
+
+    Returns
+    -------
+    bool
+        True if results is a list of dicts (possibly empty).
+    """
+    if not isinstance(results, list):
+        return False
+    return all(isinstance(item, dict) and item for item in results)
+
+
 @dataclass
 class HybridResult:
     vector_results: list[dict] = field(default_factory=list)
@@ -327,6 +352,24 @@ def hybrid_search(
             label = futures[future]
             try:
                 result = future.result(timeout=30)
+                if result is None:
+                    logger.warning(
+                        "%s arm of hybrid_search returned None; treating as empty "
+                        "results",
+                        label,
+                    )
+                    if label == "vector":
+                        hybrid.vector_results = []
+                    else:
+                        hybrid.graph_results = []
+                    continue
+                if label == "graph" and not _is_valid_graph_results(result):
+                    logger.warning(
+                        "graph arm returned malformed results (expected non-empty "
+                        "list of dicts); treating as empty results"
+                    )
+                    hybrid.graph_results = []
+                    continue
                 if label == "vector":
                     hybrid.vector_results = result
                 else:
