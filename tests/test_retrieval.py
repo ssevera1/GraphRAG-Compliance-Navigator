@@ -389,6 +389,21 @@ class TestGraphTraversalObservability:
         assert "'What'" in empty_records[0].getMessage()
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
+    def test_legitimately_empty_graph_results_do_not_log_warning(self, caplog):
+        """An entity with no neighbours yields [], which is not malformed."""
+        vs = _build_vector_store()
+        kg = self._kg_returning([])
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            result = hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert result.graph_results == []
+        assert caplog.text == ""
+
     def test_peeking_for_emptiness_does_not_drop_the_first_record(self):
         """Emptiness is decided by consuming one record - it must be put back."""
         records = [

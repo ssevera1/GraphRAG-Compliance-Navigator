@@ -217,20 +217,25 @@ def _is_valid_neighbour(neighbour: Any) -> bool:
 
 def _is_valid_graph_results(results: Any) -> bool:
     """Validate that graph traversal results are well-formed.
-    
+
+    An empty list is a normal outcome (e.g. no extracted entity names, or
+    every candidate entity legitimately having no neighbours) and must not
+    be treated as malformed - only reject results that aren't a list of
+    dicts. In the current caller, every item appended to `results` already
+    passed `_is_valid_neighbour`, so the per-item check here is
+    defense-in-depth against a future caller, not a live path.
+
     Parameters
     ----------
     results:
         The result from a graph search operation.
-    
+
     Returns
     -------
     bool
-        True if results is a non-empty list of dicts.
+        True if results is a list of dicts (possibly empty).
     """
     if not isinstance(results, list):
-        return False
-    if not results:
         return False
     return all(isinstance(item, dict) and item for item in results)
 
