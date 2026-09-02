@@ -215,6 +215,26 @@ def _is_valid_neighbour(neighbour: Any) -> bool:
     return True
 
 
+def _is_valid_graph_results(results: Any) -> bool:
+    """Validate that graph traversal results are well-formed.
+    
+    Parameters
+    ----------
+    results:
+        The result from a graph search operation.
+    
+    Returns
+    -------
+    bool
+        True if results is a non-empty list of dicts.
+    """
+    if not isinstance(results, list):
+        return False
+    if not results:
+        return False
+    return all(isinstance(item, dict) and item for item in results)
+
+
 @dataclass
 class HybridResult:
     vector_results: list[dict] = field(default_factory=list)
@@ -327,6 +347,24 @@ def hybrid_search(
             label = futures[future]
             try:
                 result = future.result(timeout=30)
+                if result is None:
+                    logger.warning(
+                        "%s arm of hybrid_search returned None; treating as empty "
+                        "results",
+                        label,
+                    )
+                    if label == "vector":
+                        hybrid.vector_results = []
+                    else:
+                        hybrid.graph_results = []
+                    continue
+                if label == "graph" and not _is_valid_graph_results(result):
+                    logger.warning(
+                        "graph arm returned malformed results (expected non-empty "
+                        "list of dicts); treating as empty results"
+                    )
+                    hybrid.graph_results = []
+                    continue
                 if label == "vector":
                     hybrid.vector_results = result
                 else:
