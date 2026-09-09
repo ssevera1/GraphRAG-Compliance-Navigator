@@ -363,10 +363,17 @@ def hybrid_search(
                     else:
                         hybrid.graph_results = []
                     continue
+                if label == "vector" and not isinstance(result, list):
+                    logger.warning(
+                        "vector arm returned malformed results (expected list); "
+                        "treating as empty results"
+                    )
+                    hybrid.vector_results = []
+                    continue
                 if label == "graph" and not _is_valid_graph_results(result):
                     logger.warning(
-                        "graph arm returned malformed results (expected non-empty "
-                        "list of dicts); treating as empty results"
+                        "graph arm returned malformed results (expected list of "
+                        "non-empty dicts); treating as empty results"
                     )
                     hybrid.graph_results = []
                     continue
