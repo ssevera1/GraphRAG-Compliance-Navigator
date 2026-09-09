@@ -228,6 +228,49 @@ class TestHybridSearch:
         assert len(result.vector_results) > 0
 
 
+class TestVectorArmObservability:
+    """A malformed vector_store.search response must be visible, not silent.
+
+    Mirrors TestGraphTraversalObservability: a duck-typed vector_store can
+    hand back something other than list[dict] (e.g. a FAISS/Chroma-style
+    store returning [(Document, score), ...]), and that must be caught and
+    logged rather than crashing downstream consumers that index r["text"].
+    """
+
+    def test_non_list_response_is_logged_and_skipped(self, caplog):
+        vs = MagicMock()
+        vs.search.return_value = 42
+        kg = _mock_knowledge_graph()
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            result = hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert result.vector_results == []
+        assert len(result.graph_results) > 0, "the healthy arm must still answer"
+        assert "vector arm returned malformed results" in caplog.text
+
+    def test_list_of_tuples_response_is_logged_and_skipped(self, caplog):
+        """A list of (text, score) tuples must not be mistaken for list[dict]."""
+        vs = MagicMock()
+        vs.search.return_value = [("Article 5 requires data minimisation.", 0.9)]
+        kg = _mock_knowledge_graph()
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            result = hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert result.vector_results == []
+        assert len(result.graph_results) > 0, "the healthy arm must still answer"
+        assert "vector arm returned malformed results" in caplog.text
+
+
 class TestExtractionResult:
     """Validate the pydantic models used for extraction output."""
 

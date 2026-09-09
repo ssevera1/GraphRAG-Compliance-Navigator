@@ -215,25 +215,28 @@ def _is_valid_neighbour(neighbour: Any) -> bool:
     return True
 
 
-def _is_valid_graph_results(results: Any) -> bool:
-    """Validate that graph traversal results are well-formed.
+def _is_valid_result_list(results: Any) -> bool:
+    """Validate that a hybrid search arm's results are well-formed.
 
     An empty list is a normal outcome (e.g. no extracted entity names, or
-    every candidate entity legitimately having no neighbours) and must not
-    be treated as malformed - only reject results that aren't a list of
-    dicts. In the current caller, every item appended to `results` already
-    passed `_is_valid_neighbour`, so the per-item check here is
-    defense-in-depth against a future caller, not a live path.
+    every candidate entity legitimately having no neighbours, or a query
+    with no vector matches) and must not be treated as malformed - only
+    reject results that aren't a list of dicts. In the graph arm's caller,
+    every item appended to `results` already passed `_is_valid_neighbour`,
+    so the per-item check here is defense-in-depth against a future caller,
+    not a live path. For the vector arm, a duck-typed `vector_store` may
+    hand back tuples or bare strings instead of `{"text": ..., "score": ...}`
+    dicts, so the per-item check is a live path there.
 
     Parameters
     ----------
     results:
-        The result from a graph search operation.
+        The result from a vector or graph search operation.
 
     Returns
     -------
     bool
-        True if results is a list of dicts (possibly empty).
+        True if results is a list of non-empty dicts (possibly empty list).
     """
     if not isinstance(results, list):
         return False
@@ -363,19 +366,16 @@ def hybrid_search(
                     else:
                         hybrid.graph_results = []
                     continue
-                if label == "vector" and not isinstance(result, list):
+                if not _is_valid_result_list(result):
                     logger.warning(
-                        "vector arm returned malformed results (expected list); "
-                        "treating as empty results"
+                        "%s arm returned malformed results (expected list of "
+                        "non-empty dicts); treating as empty results",
+                        label,
                     )
-                    hybrid.vector_results = []
-                    continue
-                if label == "graph" and not _is_valid_graph_results(result):
-                    logger.warning(
-                        "graph arm returned malformed results (expected list of "
-                        "non-empty dicts); treating as empty results"
-                    )
-                    hybrid.graph_results = []
+                    if label == "vector":
+                        hybrid.vector_results = []
+                    else:
+                        hybrid.graph_results = []
                     continue
                 if label == "vector":
                     hybrid.vector_results = result
