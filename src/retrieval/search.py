@@ -377,6 +377,11 @@ def hybrid_search(
                     else:
                         hybrid.graph_results = []
                     continue
+                if len(result) == 0:
+                    logger.debug(
+                        "%s arm of hybrid_search returned empty results",
+                        label,
+                    )
                 if label == "vector":
                     hybrid.vector_results = result
                 else:
