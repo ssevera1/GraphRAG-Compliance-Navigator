@@ -39,6 +39,28 @@ class DummyEmbeddings(Embeddings):
         return [int(c, 16) / 15.0 for c in digest[:64].ljust(64, "0")]
 
 
+def _is_valid_embedding(embedding: Any) -> bool:
+    """Validate that an embedding is well-formed.
+    
+    Parameters
+    ----------
+    embedding:
+        An embedding vector from the embedder.
+    
+    Returns
+    -------
+    bool
+        True if embedding is a non-empty list of floats.
+    """
+    if embedding is None:
+        return False
+    if not isinstance(embedding, list):
+        return False
+    if not embedding:
+        return False
+    return all(isinstance(x, (int, float)) for x in embedding)
+
+
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two vectors.
 
@@ -102,13 +124,27 @@ class VectorStore:
             self.embedder = _default_embedder()
 
     def add(self, text: str) -> None:
+        embedding = self.embedder.embed_query(text)
+        if not _is_valid_embedding(embedding):
+            logger.warning(
+                "embedder.embed_query() returned malformed embedding for text %r; "
+                "skipping document",
+                text[:50],
+            )
+            return
         self.documents.append(text)
-        self.embeddings.append(self.embedder.embed_query(text))
+        self.embeddings.append(embedding)
 
     def search(self, query: str, top_k: int = 5) -> list[dict]:
         if not self.documents:
             return []
         q_emb = self.embedder.embed_query(query)
+        if not _is_valid_embedding(q_emb):
+            logger.warning(
+                "embedder.embed_query() returned malformed embedding for query; "
+                "returning empty results"
+            )
+            return []
         scored: list[dict[str, Any]] = [
             {"text": doc, "score": cosine_similarity(q_emb, emb)}
             for doc, emb in zip(self.documents, self.embeddings)
