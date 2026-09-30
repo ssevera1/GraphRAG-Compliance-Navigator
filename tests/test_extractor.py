@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -49,6 +49,20 @@ def _llm_raising(exc):
     llm = MagicMock()
     llm.invoke.side_effect = exc
     return llm
+
+
+def _llm_failing_then_succeeding(exc, failures, content):
+    """A chat model whose invoke() raises *exc* *failures* times, then succeeds."""
+    llm = MagicMock()
+    llm.invoke.side_effect = [exc] * failures + [MagicMock(content=content)]
+    return llm
+
+
+@pytest.fixture
+def no_sleep():
+    """Collapse the backoff so retry tests do not actually wait."""
+    with patch("src.ingestion.extractor.time.sleep") as sleep:
+        yield sleep
 
 
 # ── Happy path ───────────────────────────────────────────────────────────────
@@ -127,11 +141,11 @@ class TestInvocationFailure:
             AttributeError("'dict' object has no attribute 'invoke'"),
         ],
     )
-    def test_invoke_failure_propagates(self, exc):
+    def test_invoke_failure_propagates(self, exc, no_sleep):
         with pytest.raises(type(exc)):
             extract_entities_and_relationships("text", _llm_raising(exc))
 
-    def test_invoke_failure_is_logged_with_traceback(self, caplog):
+    def test_invoke_failure_is_logged_with_traceback(self, caplog, no_sleep):
         with caplog.at_level(logging.WARNING, logger="src.ingestion.extractor"):
             with pytest.raises(RuntimeError):
                 extract_entities_and_relationships(
@@ -144,3 +158,65 @@ class TestInvocationFailure:
         assert "42 chars" in caplog.text
         # The log must not assert a cause it has not established.
         assert "timeout, rate limit, or connection error" not in caplog.text
+
+
+# ── Retry behaviour ──────────────────────────────────────────────────────────
+
+class TestRetry:
+    """The exponential-backoff ladder added for transient failures."""
+
+    def test_succeeds_after_transient_failures(self, no_sleep):
+        llm = _llm_failing_then_succeeding(
+            TimeoutError("upstream timed out"), 2, json.dumps(VALID_PAYLOAD)
+        )
+
+        result = extract_entities_and_relationships("text", llm, max_retries=3)
+
+        assert [e.name for e in result.entities] == ["Acme Corp", "GDPR"]
+        assert llm.invoke.call_count == 3
+
+    def test_exhausts_exactly_max_retries_plus_one_attempts(self, no_sleep):
+        llm = _llm_raising(TimeoutError("upstream timed out"))
+
+        with pytest.raises(TimeoutError):
+            extract_entities_and_relationships("text", llm, max_retries=3)
+
+        assert llm.invoke.call_count == 4
+
+    def test_delay_doubles_between_retries(self, no_sleep):
+        llm = _llm_raising(RuntimeError("429 rate limit exceeded"))
+
+        with pytest.raises(RuntimeError):
+            extract_entities_and_relationships(
+                "text", llm, max_retries=3, initial_delay=1.0
+            )
+
+        # Each wait is initial_delay * 2**attempt plus up to 10% jitter.
+        waits = [c.args[0] for c in no_sleep.call_args_list]
+        assert len(waits) == 3
+        assert 1.0 <= waits[0] < 1.1
+        assert 2.0 <= waits[1] < 2.2
+        assert 4.0 <= waits[2] < 4.4
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            PermissionError("401 invalid api key"),
+            AttributeError("'dict' object has no attribute 'invoke'"),
+            TypeError("unexpected keyword argument"),
+        ],
+    )
+    def test_non_transient_failures_are_not_retried(self, exc, no_sleep):
+        llm = _llm_raising(exc)
+
+        with pytest.raises(type(exc)):
+            extract_entities_and_relationships("text", llm, max_retries=3)
+
+        assert llm.invoke.call_count == 1
+        no_sleep.assert_not_called()
+
+    def test_negative_max_retries_raises_value_error(self):
+        with pytest.raises(ValueError):
+            extract_entities_and_relationships(
+                "text", _llm_returning(json.dumps(VALID_PAYLOAD)), max_retries=-1
+            )

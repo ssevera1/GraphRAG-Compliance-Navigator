@@ -15,6 +15,11 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+# Failures that will not succeed on retry: an expired/invalid credential, or a
+# caller bug (wrong argument type, unexpected response shape). Retrying these
+# only stalls the ingestion run for the full backoff budget before failing anyway.
+_NON_TRANSIENT_EXCEPTIONS = (PermissionError, AttributeError, TypeError)
+
 
 # ── Domain types ──────────────────────────────────────────────────────────────
 
@@ -133,21 +138,35 @@ def extract_entities_and_relationships(
         that never reached the model is deliberately *not* reported as an empty
         result: callers feed this straight into ``KnowledgeGraph.add_extraction``,
         so swallowing the failure would write a silently incomplete graph.
+    ValueError
+        If ``max_retries`` is negative.
     """
+    if max_retries < 0:
+        raise ValueError(f"max_retries must be >= 0, got {max_retries}")
+
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=f"Extract entities and relationships from:\n\n{text}"),
     ]
 
     delay = initial_delay
-    last_exception = None
 
     for attempt in range(max_retries + 1):
         try:
             response = llm.invoke(messages)
             break
-        except Exception as e:
-            last_exception = e
+        except _NON_TRANSIENT_EXCEPTIONS:
+            # Authentication failures and programming bugs will not succeed on
+            # retry, so burning the full backoff budget only delays a failure
+            # that is already certain. See src/storage/graph.py for the same
+            # distinction on the Neo4j connection path.
+            logger.warning(
+                "LLM invocation failed for a chunk of %d chars (non-transient)",
+                len(text),
+                exc_info=True,
+            )
+            raise
+        except Exception:
             if attempt < max_retries:
                 jitter = random.uniform(0, 0.1 * delay)
                 wait_time = delay + jitter
