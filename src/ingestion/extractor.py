@@ -6,12 +6,19 @@ import json
 import logging
 from enum import Enum
 from typing import Any, Optional
+import time
+import random
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+# Failures that will not succeed on retry: an expired/invalid credential, or a
+# caller bug (wrong argument type, unexpected response shape). Retrying these
+# only stalls the ingestion run for the full backoff budget before failing anyway.
+_NON_TRANSIENT_EXCEPTIONS = (PermissionError, AttributeError, TypeError)
 
 
 # ── Domain types ──────────────────────────────────────────────────────────────
@@ -102,6 +109,8 @@ def _as_text(content: str | list[str | dict[Any, Any]]) -> str:
 def extract_entities_and_relationships(
     text: str,
     llm: BaseChatModel,
+    max_retries: int = 3,
+    initial_delay: float = 1.0,
 ) -> ExtractionResult:
     """Send *text* to the LLM and parse structured entities / relationships.
 
@@ -111,6 +120,10 @@ def extract_entities_and_relationships(
         Raw legal text chunk to analyse.
     llm:
         Any LangChain chat model (OpenAI, Anthropic, local, …).
+    max_retries:
+        Maximum number of retry attempts for transient failures (default: 3).
+    initial_delay:
+        Initial delay in seconds before first retry (default: 1.0).
 
     Returns
     -------
@@ -121,28 +134,58 @@ def extract_entities_and_relationships(
     Raises
     ------
     Exception
-        Whatever ``llm.invoke`` raises. An extraction that never reached the
-        model is deliberately *not* reported as an empty result: callers feed
-        this straight into ``KnowledgeGraph.add_extraction``, so swallowing the
-        failure would write a silently incomplete graph.
+        Whatever ``llm.invoke`` raises after exhausting retries. An extraction
+        that never reached the model is deliberately *not* reported as an empty
+        result: callers feed this straight into ``KnowledgeGraph.add_extraction``,
+        so swallowing the failure would write a silently incomplete graph.
+    ValueError
+        If ``max_retries`` is negative.
     """
+    if max_retries < 0:
+        raise ValueError(f"max_retries must be >= 0, got {max_retries}")
+
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=f"Extract entities and relationships from:\n\n{text}"),
     ]
 
-    try:
-        response = llm.invoke(messages)
-    except Exception:
-        # Logged here because this is where the chunk being extracted is known,
-        # then re-raised: only the caller driving the ingestion loop can decide
-        # whether to skip the chunk, retry, or abort the batch.
-        logger.warning(
-            "LLM invocation failed for a chunk of %d chars",
-            len(text),
-            exc_info=True,
-        )
-        raise
+    delay = initial_delay
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = llm.invoke(messages)
+            break
+        except _NON_TRANSIENT_EXCEPTIONS:
+            # Authentication failures and programming bugs will not succeed on
+            # retry, so burning the full backoff budget only delays a failure
+            # that is already certain. See src/storage/graph.py for the same
+            # distinction on the Neo4j connection path.
+            logger.warning(
+                "LLM invocation failed for a chunk of %d chars (non-transient)",
+                len(text),
+                exc_info=True,
+            )
+            raise
+        except Exception:
+            if attempt < max_retries:
+                jitter = random.uniform(0, 0.1 * delay)
+                wait_time = delay + jitter
+                logger.debug(
+                    "LLM invocation failed (attempt %d/%d), retrying in %.2f seconds",
+                    attempt + 1,
+                    max_retries + 1,
+                    wait_time,
+                )
+                time.sleep(wait_time)
+                delay *= 2
+            else:
+                logger.warning(
+                    "LLM invocation failed for a chunk of %d chars after %d attempts",
+                    len(text),
+                    max_retries + 1,
+                    exc_info=True,
+                )
+                raise
 
     if response.content is None:
         logger.debug("LLM returned empty content")
