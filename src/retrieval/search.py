@@ -129,39 +129,39 @@ class VectorStore:
         if self.embedder is None:
             self.embedder = _default_embedder()
 
-    def add(self, text: str) -> None:
-        def _embed_with_timeout() -> list[float]:
-            import signal
-            
-            def _timeout_handler(signum: int, frame: Any) -> None:
-                raise TimeoutError(f"Embedding call exceeded {self.embed_timeout}s timeout")
-            
-            # Set signal-based timeout (Unix only; on Windows this is a no-op)
-            old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-            signal.alarm(int(self.embed_timeout) + 1)
+    def _embed_with_retry(self, text: str) -> list[float]:
+        """Embed *text*, retrying with backoff, bounded by ``embed_timeout``.
+
+        Uses a worker thread (not ``signal.alarm``) so this is safe to call
+        from any thread - including the ``ThreadPoolExecutor`` workers that
+        ``hybrid_search`` runs the vector arm on, where ``signal.signal()``
+        would raise ``ValueError``. Raises on retry exhaustion; callers
+        decide whether that should propagate or be treated as empty.
+        """
+
+        def _call_with_timeout() -> list[float]:
+            # Not a `with` block: ThreadPoolExecutor.__exit__ calls
+            # shutdown(wait=True), which would block on this very future
+            # even after it has timed out. shutdown(wait=False) lets the
+            # worker thread finish (or stay stuck) in the background
+            # without blocking the caller.
+            pool = ThreadPoolExecutor(max_workers=1)
             try:
-                return self.embedder.embed_query(text)
+                future = pool.submit(self.embedder.embed_query, text)
+                return future.result(timeout=self.embed_timeout)
             finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
-        
-        try:
-            embedding = _retry_with_backoff(
-                _embed_with_timeout,
-                max_retries=self.embed_max_retries,
-                initial_delay=0.1,
-                backoff_factor=2.0,
-            )
-        except Exception as e:
-            logger.warning(
-                "Failed to embed text %r after %d retries: %s; "
-                "skipping document",
-                text[:50],
-                self.embed_max_retries,
-                str(e),
-            )
-            return
-        
+                pool.shutdown(wait=False)
+
+        return _retry_with_backoff(
+            _call_with_timeout,
+            max_retries=self.embed_max_retries,
+            initial_delay=0.1,
+            backoff_factor=2.0,
+        )
+
+    def add(self, text: str) -> None:
+        embedding = self._embed_with_retry(text)
+
         if not _is_valid_embedding(embedding):
             logger.warning(
                 "embedder.embed_query() returned malformed embedding for text %r; "
@@ -175,28 +175,9 @@ class VectorStore:
     def search(self, query: str, top_k: int = 5) -> list[dict]:
         if not self.documents:
             return []
-        
-        def _embed_query_with_timeout() -> list[float]:
-            import signal
-            
-            def _timeout_handler(signum: int, frame: Any) -> None:
-                raise TimeoutError(f"Embedding call exceeded {self.embed_timeout}s timeout")
-            
-            old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-            signal.alarm(int(self.embed_timeout) + 1)
-            try:
-                return self.embedder.embed_query(query)
-            finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
-        
+
         try:
-            q_emb = _retry_with_backoff(
-                _embed_query_with_timeout,
-                max_retries=self.embed_max_retries,
-                initial_delay=0.1,
-                backoff_factor=2.0,
-            )
+            q_emb = self._embed_with_retry(query)
         except Exception as e:
             logger.warning(
                 "Failed to embed query after %d retries: %s; "
@@ -205,7 +186,7 @@ class VectorStore:
                 str(e),
             )
             return []
-        
+
         if not _is_valid_embedding(q_emb):
             logger.warning(
                 "embedder.embed_query() returned malformed embedding for query; "

@@ -228,6 +228,89 @@ class TestHybridSearch:
         assert len(result.vector_results) > 0
 
 
+class _FlakyEmbeddings(DummyEmbeddings):
+    """Fails ``fail_times`` calls (optionally sleeping first), then succeeds."""
+
+    def __init__(self, fail_times: int = 0, sleep: float = 0.0) -> None:
+        self.fail_times = fail_times
+        self.sleep = sleep
+        self.calls = 0
+
+    def embed_query(self, text: str) -> list[float]:
+        import time
+
+        self.calls += 1
+        if self.sleep:
+            time.sleep(self.sleep)
+        if self.calls <= self.fail_times:
+            raise RuntimeError(f"embedding backend flaked (call {self.calls})")
+        return super().embed_query(text)
+
+
+class TestEmbedTimeoutAndRetry:
+    """search()'s timeout must be thread-safe, and retries must behave."""
+
+    def test_search_runs_inside_hybrid_search_worker_thread(self):
+        """Regression test: signal.alarm() crashes off the main thread.
+
+        hybrid_search always runs the vector arm on a ThreadPoolExecutor
+        worker (search.py's _vector_search), so VectorStore.search() must
+        not depend on signal-based timeouts, which raise ValueError outside
+        the main thread.
+        """
+        vs = _build_vector_store()
+        kg = _mock_knowledge_graph()
+
+        result = hybrid_search(
+            query="What clauses violate GDPR?",
+            vector_store=vs,
+            knowledge_graph=kg,
+        )
+
+        assert len(result.vector_results) > 0
+
+    def test_retry_then_succeed(self):
+        vs = VectorStore(
+            embedder=_FlakyEmbeddings(fail_times=2),
+            embed_max_retries=3,
+        )
+        vs.add("Article 5 of GDPR requires data minimisation.")
+
+        assert len(vs.documents) == 1
+
+    def test_retry_exhaustion_raises_from_add(self):
+        vs = VectorStore(
+            embedder=_FlakyEmbeddings(fail_times=10),
+            embed_max_retries=2,
+        )
+
+        with pytest.raises(RuntimeError, match="embedding backend flaked"):
+            vs.add("Article 5 of GDPR requires data minimisation.")
+
+        assert vs.documents == []
+
+    def test_retry_exhaustion_returns_empty_from_search(self, caplog):
+        vs = _build_vector_store()
+        vs.embedder = _FlakyEmbeddings(fail_times=10)
+        vs.embed_max_retries = 1
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            results = vs.search("What clauses violate GDPR?")
+
+        assert results == []
+        assert "Failed to embed query" in caplog.text
+
+    def test_embed_timeout_is_enforced(self):
+        vs = VectorStore(
+            embedder=_FlakyEmbeddings(sleep=0.2),
+            embed_timeout=0.05,
+            embed_max_retries=0,
+        )
+
+        with pytest.raises(TimeoutError):
+            vs.add("Article 5 of GDPR requires data minimisation.")
+
+
 class TestVectorArmObservability:
     """A malformed vector_store.search response must be visible, not silent.
 
