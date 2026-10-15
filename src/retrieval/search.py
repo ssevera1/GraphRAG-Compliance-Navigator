@@ -8,6 +8,7 @@ import re
 import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from itertools import chain
 from typing import Any, Callable, TypeVar
@@ -113,18 +114,69 @@ class VectorStore:
         Any LangChain ``Embeddings`` implementation.  Defaults to
         ``HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")`` when
         *None* is provided.
+    embed_timeout:
+        Timeout in seconds for each embedding attempt. Defaults to 10.
+    embed_max_retries:
+        Maximum number of retries for embedding calls. Defaults to 2.
+
+    The real worst-case latency of one embedding is
+    ``embed_timeout * (embed_max_retries + 1)`` plus backoff, about 30s with
+    the defaults. Keep it within the 30s per-arm budget in ``hybrid_search``:
+    that pool cannot abandon a stuck worker, so a larger budget here blocks
+    the whole query for its full length.
     """
 
     embedder: Embeddings = field(default=None)  # type: ignore[assignment]
     documents: list[str] = field(default_factory=list)
     embeddings: list[list[float]] = field(default_factory=list)
+    embed_timeout: float = field(default=10.0)
+    embed_max_retries: int = field(default=2)
 
     def __post_init__(self) -> None:
         if self.embedder is None:
             self.embedder = _default_embedder()
 
+    def _embed_with_retry(self, text: str) -> list[float]:
+        """Embed *text*, retrying with backoff, bounded by ``embed_timeout``.
+
+        Uses a worker thread (not ``signal.alarm``) so this is safe to call
+        from any thread - including the ``ThreadPoolExecutor`` workers that
+        ``hybrid_search`` runs the vector arm on, where ``signal.signal()``
+        would raise ``ValueError``. Raises on retry exhaustion; callers
+        decide whether that should propagate or be treated as empty.
+        """
+
+        def _call_with_timeout() -> list[float]:
+            # Not a `with` block: ThreadPoolExecutor.__exit__ calls
+            # shutdown(wait=True), which would block on this very future
+            # even after it has timed out. shutdown(wait=False) lets the
+            # worker thread finish (or stay stuck) in the background
+            # without blocking the caller.
+            pool = ThreadPoolExecutor(max_workers=1)
+            try:
+                future = pool.submit(self.embedder.embed_query, text)
+                try:
+                    return future.result(timeout=self.embed_timeout)
+                except FuturesTimeoutError as exc:
+                    # Before Python 3.11 this is not the builtin TimeoutError.
+                    # Re-raise the builtin so `except TimeoutError` works on
+                    # every supported version.
+                    raise TimeoutError(
+                        f"embedding timed out after {self.embed_timeout}s"
+                    ) from exc
+            finally:
+                pool.shutdown(wait=False)
+
+        return _retry_with_backoff(
+            _call_with_timeout,
+            max_retries=self.embed_max_retries,
+            initial_delay=0.1,
+            backoff_factor=2.0,
+        )
+
     def add(self, text: str) -> None:
-        embedding = self.embedder.embed_query(text)
+        embedding = self._embed_with_retry(text)
+
         if not _is_valid_embedding(embedding):
             logger.warning(
                 "embedder.embed_query() returned malformed embedding for text %r; "
@@ -138,7 +190,18 @@ class VectorStore:
     def search(self, query: str, top_k: int = 5) -> list[dict]:
         if not self.documents:
             return []
-        q_emb = self.embedder.embed_query(query)
+
+        try:
+            q_emb = self._embed_with_retry(query)
+        except Exception as e:
+            logger.warning(
+                "Failed to embed query after %d retries: %s; "
+                "returning empty results",
+                self.embed_max_retries,
+                str(e),
+            )
+            return []
+
         if not _is_valid_embedding(q_emb):
             logger.warning(
                 "embedder.embed_query() returned malformed embedding for query; "
