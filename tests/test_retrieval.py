@@ -310,6 +310,10 @@ class TestEmbedTimeoutAndRetry:
         with pytest.raises(TimeoutError):
             vs.add("Article 5 of GDPR requires data minimisation.")
 
+    def test_default_retry_budget_fits_hybrid_search_arm(self):
+        vs = VectorStore(embedder=_FlakyEmbeddings())
+        assert vs.embed_timeout * (vs.embed_max_retries + 1) <= 30.0
+
 
 class TestVectorArmObservability:
     """A malformed vector_store.search response must be visible, not silent.

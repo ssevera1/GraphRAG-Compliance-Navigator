@@ -8,6 +8,7 @@ import re
 import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from itertools import chain
 from typing import Any, Callable, TypeVar
@@ -114,16 +115,22 @@ class VectorStore:
         ``HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")`` when
         *None* is provided.
     embed_timeout:
-        Timeout in seconds for embedding calls. Defaults to 30.
+        Timeout in seconds for each embedding attempt. Defaults to 10.
     embed_max_retries:
-        Maximum number of retries for embedding calls. Defaults to 3.
+        Maximum number of retries for embedding calls. Defaults to 2.
+
+    The real worst-case latency of one embedding is
+    ``embed_timeout * (embed_max_retries + 1)`` plus backoff, about 30s with
+    the defaults. Keep it within the 30s per-arm budget in ``hybrid_search``:
+    that pool cannot abandon a stuck worker, so a larger budget here blocks
+    the whole query for its full length.
     """
 
     embedder: Embeddings = field(default=None)  # type: ignore[assignment]
     documents: list[str] = field(default_factory=list)
     embeddings: list[list[float]] = field(default_factory=list)
-    embed_timeout: float = field(default=30.0)
-    embed_max_retries: int = field(default=3)
+    embed_timeout: float = field(default=10.0)
+    embed_max_retries: int = field(default=2)
 
     def __post_init__(self) -> None:
         if self.embedder is None:
@@ -148,7 +155,15 @@ class VectorStore:
             pool = ThreadPoolExecutor(max_workers=1)
             try:
                 future = pool.submit(self.embedder.embed_query, text)
-                return future.result(timeout=self.embed_timeout)
+                try:
+                    return future.result(timeout=self.embed_timeout)
+                except FuturesTimeoutError as exc:
+                    # Before Python 3.11 this is not the builtin TimeoutError.
+                    # Re-raise the builtin so `except TimeoutError` works on
+                    # every supported version.
+                    raise TimeoutError(
+                        f"embedding timed out after {self.embed_timeout}s"
+                    ) from exc
             finally:
                 pool.shutdown(wait=False)
 
