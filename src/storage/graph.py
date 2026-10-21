@@ -49,6 +49,25 @@ def _connect_with_retries(uri: str, user: str, password: str) -> Driver:
     )
 
 
+def _execute_with_retries(session_fn, *args, **kwargs):
+    """Execute a Neo4j operation with retry logic for transient failures."""
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return session_fn(*args, **kwargs)
+        except (AuthError, ConfigurationError):
+            raise
+        except Exception as exc:
+            if attempt == _MAX_RETRIES - 1:
+                raise RuntimeError(
+                    f"Neo4j query failed after {_MAX_RETRIES} attempts"
+                ) from exc
+            time.sleep(_BASE_DELAY * (2 ** attempt))
+
+    raise RuntimeError(  # pragma: no cover - _MAX_RETRIES is always >= 1
+        "Neo4j query failed: no execution attempts were made"
+    )
+
+
 class KnowledgeGraph:
     """Thin wrapper around a Neo4j instance for storing compliance triplets.
 
@@ -74,8 +93,10 @@ class KnowledgeGraph:
             f"MERGE (n:{entity.type.value} {{name: $name}}) "
             "SET n += $props"
         )
-        with self._driver.session() as session:
-            session.run(query, name=entity.name, props=entity.properties)
+        def run_query():
+            with self._driver.session() as session:
+                session.run(query, name=entity.name, props=entity.properties)
+        _execute_with_retries(run_query)
 
     def add_relationship(self, rel: Relationship) -> None:
         """Merge a relationship between two already-existing nodes."""
@@ -84,10 +105,12 @@ class KnowledgeGraph:
             f"MERGE (a)-[r:{rel.type.value}]->(b) "
             "SET r += $props"
         )
-        with self._driver.session() as session:
-            session.run(
-                query, src=rel.source, tgt=rel.target, props=rel.properties,
-            )
+        def run_query():
+            with self._driver.session() as session:
+                session.run(
+                    query, src=rel.source, tgt=rel.target, props=rel.properties,
+                )
+        _execute_with_retries(run_query)
 
     def add_extraction(self, result: ExtractionResult) -> None:
         """Persist every entity and relationship from an extraction run."""
@@ -104,17 +127,23 @@ class KnowledgeGraph:
             "       m.name AS target, labels(m) AS target_labels, "
             "       properties(r) AS rel_props"
         )
-        with self._driver.session() as session:
-            records = session.run(query, name=entity_name)
-            return [record.data() for record in records]
+        def run_query():
+            with self._driver.session() as session:
+                records = session.run(query, name=entity_name)
+                return [record.data() for record in records]
+        return _execute_with_retries(run_query)
 
     def query(self, cypher: str, **params) -> list[dict]:
         """Run an arbitrary Cypher query and return results as dicts."""
-        with self._driver.session() as session:
-            records = session.run(cypher, **params)
-            return [record.data() for record in records]
+        def run_query():
+            with self._driver.session() as session:
+                records = session.run(cypher, **params)
+                return [record.data() for record in records]
+        return _execute_with_retries(run_query)
 
     def clear(self) -> None:
         """Delete all nodes and relationships (use with care)."""
-        with self._driver.session() as session:
-            session.run("MATCH (n) DETACH DELETE n")
+        def run_query():
+            with self._driver.session() as session:
+                session.run("MATCH (n) DETACH DELETE n")
+        _execute_with_retries(run_query)
