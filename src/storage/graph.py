@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from neo4j import GraphDatabase, Driver
-from neo4j.exceptions import AuthError, ConfigurationError
+from neo4j.exceptions import AuthError, ClientError, ConfigurationError
 
 from src.ingestion.extractor import Entity, ExtractionResult, Relationship
 
@@ -49,22 +49,29 @@ def _connect_with_retries(uri: str, user: str, password: str) -> Driver:
     )
 
 
-def _execute_with_retries(session_fn, *args, **kwargs):
-    """Execute a Neo4j operation with retry logic for transient failures."""
+def _execute_with_retries(operation: str, session_fn, *args, **kwargs):
+    """Execute a Neo4j operation with retry logic for transient failures.
+
+    ``ClientError`` (and its subclasses ``AuthError``, ``CypherSyntaxError``,
+    ``ConstraintError``, ``Forbidden``, ...) are deterministic -- retrying a
+    bad query or a permissions failure just delays the same failure -- so
+    they propagate immediately instead of stalling for the full retry
+    budget, mirroring ``_connect_with_retries``.
+    """
     for attempt in range(_MAX_RETRIES):
         try:
             return session_fn(*args, **kwargs)
-        except (AuthError, ConfigurationError):
+        except (ClientError, ConfigurationError):
             raise
         except Exception as exc:
             if attempt == _MAX_RETRIES - 1:
                 raise RuntimeError(
-                    f"Neo4j query failed after {_MAX_RETRIES} attempts"
+                    f"Neo4j {operation} failed after {_MAX_RETRIES} attempts: {exc}"
                 ) from exc
             time.sleep(_BASE_DELAY * (2 ** attempt))
 
     raise RuntimeError(  # pragma: no cover - _MAX_RETRIES is always >= 1
-        "Neo4j query failed: no execution attempts were made"
+        f"Neo4j {operation} failed: no execution attempts were made"
     )
 
 
@@ -96,7 +103,7 @@ class KnowledgeGraph:
         def run_query():
             with self._driver.session() as session:
                 session.run(query, name=entity.name, props=entity.properties)
-        _execute_with_retries(run_query)
+        _execute_with_retries("add_entity", run_query)
 
     def add_relationship(self, rel: Relationship) -> None:
         """Merge a relationship between two already-existing nodes."""
@@ -110,7 +117,7 @@ class KnowledgeGraph:
                 session.run(
                     query, src=rel.source, tgt=rel.target, props=rel.properties,
                 )
-        _execute_with_retries(run_query)
+        _execute_with_retries("add_relationship", run_query)
 
     def add_extraction(self, result: ExtractionResult) -> None:
         """Persist every entity and relationship from an extraction run."""
@@ -131,19 +138,27 @@ class KnowledgeGraph:
             with self._driver.session() as session:
                 records = session.run(query, name=entity_name)
                 return [record.data() for record in records]
-        return _execute_with_retries(run_query)
+        return _execute_with_retries("get_neighbours", run_query)
 
     def query(self, cypher: str, **params) -> list[dict]:
-        """Run an arbitrary Cypher query and return results as dicts."""
+        """Run an arbitrary Cypher query and return results as dicts.
+
+        Retried the same way as the other methods on transient failures.
+        Because a retry re-runs the whole statement, including any writes
+        it performs, *cypher* must be idempotent (e.g. ``MERGE``, not
+        ``CREATE`` or ``SET n.count = n.count + 1``) -- otherwise a
+        connection drop after the write has committed but before the
+        result stream finishes would apply it twice.
+        """
         def run_query():
             with self._driver.session() as session:
                 records = session.run(cypher, **params)
                 return [record.data() for record in records]
-        return _execute_with_retries(run_query)
+        return _execute_with_retries("query", run_query)
 
     def clear(self) -> None:
         """Delete all nodes and relationships (use with care)."""
         def run_query():
             with self._driver.session() as session:
                 session.run("MATCH (n) DETACH DELETE n")
-        _execute_with_retries(run_query)
+        _execute_with_retries("clear", run_query)

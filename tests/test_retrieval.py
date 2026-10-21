@@ -601,6 +601,38 @@ class TestHybridArmFailureIsVisible:
         assert len(result.graph_results) > 0, "the healthy arm must still answer"
         assert "vector arm of hybrid_search failed" in caplog.text
 
+    def test_graph_arm_does_not_retry_on_top_of_get_neighbours(self, caplog):
+        """get_neighbours() already retries internally (src/storage/graph.py).
+
+        A second retry layer here would stack its own backoff on top of
+        that one and blow the 30s per-arm budget enforced by the
+        `future.result(timeout=30)` in hybrid_search - see the docstring on
+        `VectorStore` for the sibling budget this mirrors. Regression test
+        for that nesting: this must call get_neighbours exactly once per
+        entity name, not retry it with extra sleeps.
+        """
+        vs = _build_vector_store()
+        kg = MagicMock(spec=KnowledgeGraph)
+        calls: list[str] = []
+
+        def _boom(name):
+            calls.append(name)
+            raise RuntimeError("neo4j is down")
+
+        kg.get_neighbours = _boom
+
+        with patch("src.retrieval.search.time.sleep") as sleep:
+            with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+                result = hybrid_search(
+                    query="What clauses violate GDPR?",
+                    vector_store=vs,
+                    knowledge_graph=kg,
+                )
+
+        assert result.graph_results == []
+        assert len(calls) == len(set(calls)), "each entity name was retried"
+        assert not sleep.called, "no backoff sleep should happen in this arm"
+
     def test_healthy_query_logs_no_arm_failure(self, caplog):
         vs = _build_vector_store()
         kg = _mock_knowledge_graph()
