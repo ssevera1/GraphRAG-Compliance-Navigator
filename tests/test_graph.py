@@ -11,9 +11,15 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from neo4j.exceptions import AuthError, ConfigurationError, ServiceUnavailable
+from neo4j.exceptions import (
+    AuthError,
+    ClientError,
+    ConfigurationError,
+    CypherSyntaxError,
+    ServiceUnavailable,
+)
 
-from src.storage.graph import KnowledgeGraph
+from src.storage.graph import _MAX_RETRIES, KnowledgeGraph, _execute_with_retries
 
 
 URI = "bolt://localhost:7687"
@@ -111,6 +117,70 @@ class TestNonRetryableFailures:
         assert len(factory.drivers) == 1, "startup misconfiguration was retried"
         assert not no_sleep.called
         assert factory.drivers[0].close.called
+
+
+class TestExecuteWithRetries:
+    """Covers the retry helper `KnowledgeGraph`'s query methods share."""
+
+    def test_transient_failure_is_retried_until_success(self, no_sleep):
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise ServiceUnavailable("booting")
+            return "ok"
+
+        result = _execute_with_retries("query", flaky)
+
+        assert result == "ok"
+        assert calls["n"] == 3
+        assert [c.args[0] for c in no_sleep.call_args_list] == [0.5, 1.0]
+
+    def test_exhausted_retries_raise_with_original_exception_chained(self, no_sleep):
+        cause = ServiceUnavailable("down")
+
+        def always_fails():
+            raise cause
+
+        with pytest.raises(RuntimeError) as excinfo:
+            _execute_with_retries("query", always_fails)
+
+        assert "query" in str(excinfo.value)
+        assert excinfo.value.__cause__ is cause
+        assert no_sleep.call_count == _MAX_RETRIES - 1
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            AuthError("bad password"),
+            ConfigurationError("bad scheme"),
+            CypherSyntaxError("Invalid syntax"),
+        ],
+    )
+    def test_non_transient_errors_propagate_without_sleeping(self, error, no_sleep):
+        calls = {"n": 0}
+
+        def fails_once():
+            calls["n"] += 1
+            raise error
+
+        with pytest.raises(type(error)):
+            _execute_with_retries("query", fails_once)
+
+        assert calls["n"] == 1, "a non-transient error was retried"
+        assert not no_sleep.called
+
+    def test_client_error_subclasses_are_non_transient(self, no_sleep):
+        """ClientError covers CypherSyntaxError/ConstraintError/Forbidden too."""
+
+        def fails():
+            raise ClientError("generic client error")
+
+        with pytest.raises(ClientError):
+            _execute_with_retries("query", fails)
+
+        assert not no_sleep.called
 
 
 class TestDriverAttributeIsNotOptional:
