@@ -605,11 +605,9 @@ class TestHybridArmFailureIsVisible:
         """get_neighbours() already retries internally (src/storage/graph.py).
 
         A second retry layer here would stack its own backoff on top of
-        that one and blow the 30s per-arm budget enforced by the
-        `future.result(timeout=30)` in hybrid_search - see the docstring on
-        `VectorStore` for the sibling budget this mirrors. Regression test
-        for that nesting: this must call get_neighbours exactly once per
-        entity name, not retry it with extra sleeps.
+        that one. Regression test for that nesting: this must call
+        get_neighbours exactly once per entity name, not retry it with
+        extra sleeps.
         """
         vs = _build_vector_store()
         kg = MagicMock(spec=KnowledgeGraph)
@@ -632,6 +630,45 @@ class TestHybridArmFailureIsVisible:
         assert result.graph_results == []
         assert len(calls) == len(set(calls)), "each entity name was retried"
         assert not sleep.called, "no backoff sleep should happen in this arm"
+
+    def test_builtin_timeout_error_from_an_arm_keeps_its_traceback(self, caplog):
+        """A socket-level TimeoutError (e.g. from the Neo4j driver) must be
+
+        handled by the generic arm-failure path, with a real traceback and
+        the arm's own message - not silently reattributed to a "30s time
+        budget" that `hybrid_search` does not actually enforce (see the
+        comment on `_collect_neighbours`: `as_completed()` only yields
+        futures that are already done, so `future.result(timeout=30)` can
+        never time out).
+
+        On Python 3.11+, `concurrent.futures.TimeoutError` is the same
+        class as the builtin `TimeoutError`, so a driver-level timeout here
+        is indistinguishable from the (nonexistent) per-arm budget timing
+        out - a mistargeted `except` could catch this and lose the
+        traceback.
+        """
+        vs = _build_vector_store()
+        kg = MagicMock(spec=KnowledgeGraph)
+
+        def _boom(name):
+            raise TimeoutError("neo4j socket read timed out")
+
+        kg.get_neighbours = _boom
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            result = hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert result.graph_results == []
+        assert len(result.vector_results) > 0, "the healthy arm must still answer"
+        assert "graph arm of hybrid_search failed" in caplog.text
+        assert "neo4j socket read timed out" in caplog.text
+        assert any(
+            record.exc_info is not None for record in caplog.records
+        ), "the original traceback must be preserved, not discarded"
 
     def test_healthy_query_logs_no_arm_failure(self, caplog):
         vs = _build_vector_store()

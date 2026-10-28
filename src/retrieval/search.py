@@ -385,8 +385,10 @@ def hybrid_search(
             # get_neighbours() already retries transient Neo4j failures on
             # its own (src/storage/graph.py); wrapping it in another
             # _retry_with_backoff here would stack a second retry budget on
-            # top of that one and bust the 30s per-arm budget enforced by
-            # the `future.result(timeout=30)` below.
+            # top of that one. Note there is no wall-clock budget on this
+            # arm: `future.result(timeout=30)` below only ever observes
+            # futures that `as_completed()` has already reported as done,
+            # so that timeout can never fire.
             results: list[dict] = []
             for name in entity_names:
                 neighbours = knowledge_graph.get_neighbours(name)
@@ -490,16 +492,6 @@ def hybrid_search(
                     hybrid.vector_results = result
                 else:
                     hybrid.graph_results = result
-            except FuturesTimeoutError:
-                logger.error(
-                    "%s arm of hybrid_search exhausted its 30s time budget; "
-                    "it contributes no results to this query",
-                    label,
-                )
-                if label == "vector":
-                    hybrid.vector_results = []
-                else:
-                    hybrid.graph_results = []
             except Exception:
                 # Without this, a total failure of one arm is indistinguishable
                 # from that arm legitimately finding nothing - the same
