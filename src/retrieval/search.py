@@ -490,6 +490,16 @@ def hybrid_search(
                     hybrid.vector_results = result
                 else:
                     hybrid.graph_results = result
+            except FuturesTimeoutError:
+                logger.error(
+                    "%s arm of hybrid_search exhausted its 30s time budget; "
+                    "it contributes no results to this query",
+                    label,
+                )
+                if label == "vector":
+                    hybrid.vector_results = []
+                else:
+                    hybrid.graph_results = []
             except Exception:
                 # Without this, a total failure of one arm is indistinguishable
                 # from that arm legitimately finding nothing - the same
