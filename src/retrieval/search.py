@@ -422,18 +422,8 @@ def hybrid_search(
                 # almost every query ("What", "Which", "Under") arrives here
                 # as a non-node and legitimately has no neighbours. Warning on
                 # that would bury the actionable warnings below it.
-                try:
-                    iterator = iter(neighbours)
-                    first = next(iterator, _NO_NEIGHBOURS)
-                except (TypeError, StopIteration) as e:
-                    logger.warning(
-                        "get_neighbours(%r) returned a value that could not be "
-                        "iterated: %s; skipping this entity",
-                        name,
-                        str(e),
-                    )
-                    continue
-
+                iterator = iter(neighbours)
+                first = next(iterator, _NO_NEIGHBOURS)
                 if first is _NO_NEIGHBOURS:
                     logger.debug(
                         "get_neighbours(%r) returned no neighbours; this "
