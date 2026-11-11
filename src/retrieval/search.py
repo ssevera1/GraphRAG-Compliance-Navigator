@@ -459,37 +459,24 @@ def hybrid_search(
             label = futures[future]
             try:
                 result = future.result(timeout=30)
-                if result is None:
-                    logger.warning(
-                        "%s arm of hybrid_search returned None; treating as empty "
-                        "results",
-                        label,
-                    )
-                    if label == "vector":
-                        hybrid.vector_results = []
-                    else:
-                        hybrid.graph_results = []
-                    continue
-                if not _is_valid_result_list(result):
-                    logger.warning(
-                        "%s arm returned malformed results (expected list of "
-                        "non-empty dicts); treating as empty results",
-                        label,
-                    )
-                    if label == "vector":
-                        hybrid.vector_results = []
-                    else:
-                        hybrid.graph_results = []
-                    continue
-                if len(result) == 0:
-                    logger.debug(
-                        "%s arm of hybrid_search returned empty results",
-                        label,
-                    )
+            except FuturesTimeoutError:
+                # as_completed() only yields futures that are already done, so
+                # this never fires because an arm ran past the 30s passed to
+                # future.result() below - it fires because concurrent.futures
+                # .TimeoutError is the builtin TimeoutError (3.11+), so an arm
+                # that raises its own TimeoutError (e.g. _embed_with_retry's
+                # embed_timeout, or a Neo4j socket.timeout) lands here too.
+                logger.warning(
+                    "%s arm of hybrid_search raised a timeout; it contributes "
+                    "no results to this query",
+                    label,
+                    exc_info=True,
+                )
                 if label == "vector":
-                    hybrid.vector_results = result
+                    hybrid.vector_results = []
                 else:
-                    hybrid.graph_results = result
+                    hybrid.graph_results = []
+                continue
             except Exception:
                 # Without this, a total failure of one arm is indistinguishable
                 # from that arm legitimately finding nothing - the same
@@ -504,5 +491,38 @@ def hybrid_search(
                     hybrid.vector_results = []
                 else:
                     hybrid.graph_results = []
+                continue
+
+            if result is None:
+                logger.warning(
+                    "%s arm of hybrid_search returned None; treating as empty "
+                    "results",
+                    label,
+                )
+                if label == "vector":
+                    hybrid.vector_results = []
+                else:
+                    hybrid.graph_results = []
+                continue
+            if not _is_valid_result_list(result):
+                logger.warning(
+                    "%s arm returned malformed results (expected list of "
+                    "non-empty dicts); treating as empty results",
+                    label,
+                )
+                if label == "vector":
+                    hybrid.vector_results = []
+                else:
+                    hybrid.graph_results = []
+                continue
+            if len(result) == 0:
+                logger.debug(
+                    "%s arm of hybrid_search returned empty results",
+                    label,
+                )
+            if label == "vector":
+                hybrid.vector_results = result
+            else:
+                hybrid.graph_results = result
 
     return hybrid

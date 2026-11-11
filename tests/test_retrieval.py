@@ -645,3 +645,27 @@ class TestHybridArmFailureIsVisible:
             )
 
         assert "hybrid_search failed" not in caplog.text
+
+    def test_arm_timeout_error_is_logged_with_cause_and_traceback(self, caplog):
+        """An arm that raises TimeoutError itself (e.g. embed_timeout exhausted)
+        must be logged with its real cause and traceback, not mislabelled as
+        having exceeded the 30s future.result() budget it never actually hit -
+        as_completed() only yields futures that are already done, so that
+        budget can't be the real cause here.
+        """
+        vs = MagicMock()
+        vs.search.side_effect = TimeoutError("embedding timed out after 10.0s")
+        kg = _mock_knowledge_graph()
+
+        with caplog.at_level(logging.WARNING, logger="src.retrieval.search"):
+            result = hybrid_search(
+                query="What clauses violate GDPR?",
+                vector_store=vs,
+                knowledge_graph=kg,
+            )
+
+        assert result.vector_results == []
+        assert len(result.graph_results) > 0, "the healthy arm must still answer"
+        assert "vector arm of hybrid_search raised a timeout" in caplog.text
+        assert "exceeded 30s timeout budget" not in caplog.text
+        assert "embedding timed out after 10.0s" in caplog.text
