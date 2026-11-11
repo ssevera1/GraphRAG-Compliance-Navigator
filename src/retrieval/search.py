@@ -460,10 +460,17 @@ def hybrid_search(
             try:
                 result = future.result(timeout=30)
             except FuturesTimeoutError:
+                # as_completed() only yields futures that are already done, so
+                # this never fires because an arm ran past the 30s passed to
+                # future.result() below - it fires because concurrent.futures
+                # .TimeoutError is the builtin TimeoutError (3.11+), so an arm
+                # that raises its own TimeoutError (e.g. _embed_with_retry's
+                # embed_timeout, or a Neo4j socket.timeout) lands here too.
                 logger.warning(
-                    "%s arm of hybrid_search exceeded 30s timeout budget; "
-                    "it contributes no results to this query",
+                    "%s arm of hybrid_search raised a timeout; it contributes "
+                    "no results to this query",
                     label,
+                    exc_info=True,
                 )
                 if label == "vector":
                     hybrid.vector_results = []
