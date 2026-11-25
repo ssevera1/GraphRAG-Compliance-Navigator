@@ -382,14 +382,14 @@ def hybrid_search(
             return []
 
         def _collect_neighbours() -> list[dict]:
+            # get_neighbours() already retries transient Neo4j failures on
+            # its own (src/storage/graph.py); wrapping it in another
+            # _retry_with_backoff here would stack a second retry budget on
+            # top of that one and bust the 30s per-arm budget enforced by
+            # the `future.result(timeout=30)` below.
             results: list[dict] = []
             for name in entity_names:
-                neighbours = _retry_with_backoff(
-                    lambda name=name: knowledge_graph.get_neighbours(name),
-                    max_retries=2,
-                    initial_delay=0.1,
-                    backoff_factor=2.0,
-                )
+                neighbours = knowledge_graph.get_neighbours(name)
 
                 if neighbours is None:
                     logger.warning(
